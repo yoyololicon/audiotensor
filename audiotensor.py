@@ -4,7 +4,7 @@ import numpy as np
 from torch import Tensor
 from typing import Union, Iterable
 from functools import reduce
-from itertools import chain
+from math import gcd
 
 
 def linear_upsample(x: Tensor, hop_length: int) -> Tensor:
@@ -95,9 +95,7 @@ class AudioTensor(Tensor):
         return expand_self_copy
 
     def as_tensor(self):
-        t = self.clone()
-        t.hop_length = -1
-        return t
+        return torch.Tensor(self)
 
     @property
     @check_hop_length
@@ -146,7 +144,7 @@ class AudioTensor(Tensor):
             args = broadcasted_args
 
         def get_output_hop(cur, xs):
-            if len(xs) == 0:
+            if len(xs) == 0 or cur > 0:
                 return cur
             x, *xs = xs
             if isinstance(x, AudioTensor):
@@ -160,20 +158,20 @@ class AudioTensor(Tensor):
 
         ret = super().__torch_function__(func, types, args, kwargs)
 
-        def post_process(out_hop, xs):
+        def post_process(*xs):
             if len(xs) == 0:
                 return ()
             x, *xs = xs
             if isinstance(x, AudioTensor):
-                x.hop_length = out_hop
+                x.hop_length = output_hop
                 if x.ndim == 1:
                     x.hop_length = -1
-            return (x,) + post_process(out_hop, xs)
+            return (x,) + post_process(*xs)
 
         return (
-            post_process(output_hop, ret)
+            post_process(*ret)
             if isinstance(ret, tuple)
-            else post_process(output_hop, (ret,))[0]
+            else post_process(ret)[0]
         )
 
     @classmethod
@@ -181,19 +179,14 @@ class AudioTensor(Tensor):
         assert len(tensors) > 0
         # check hop lengths are divisible by each other
         hop_lengths = tuple(t.hop_length for t in tensors)
-        minimum_hop_length = min(hop_lengths)
-        assert all(
-            h % minimum_hop_length == 0 for h in hop_lengths
-        ), "All hop lengths must be divisible by each other"
+        hop_length_gcd = gcd(*hop_lengths)
         ret = tuple(
-            t.reduce_hop_length(t.hop_length // minimum_hop_length)
-            if t.hop_length > minimum_hop_length
-            else t
+            t.reduce_hop_length(t.hop_length // hop_length_gcd)
             for t in tensors
         )
         max_ndim = max(t.ndim for t in ret)
         ret = tuple(
-            t[(slice(None),) * t.ndim + (None,) * (max_ndim - t.ndim)]
+            reduce(lambda x, _: x.unsqueeze(-1), [None] * (max_ndim - t.ndim), t)
             if t.ndim < max_ndim
             else t
             for t in ret
