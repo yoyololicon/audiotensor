@@ -152,7 +152,7 @@ class AudioTensor(Tensor):
             if isinstance(x, AudioTensor):
                 return get_output_hop(max(cur, x.hop_length), xs)
             elif isinstance(x, Iterable):
-                return get_output_hop(cur, tuple(x) + xs)
+                return get_output_hop(cur, list(x) + xs)
             else:
                 return get_output_hop(cur, xs)
 
