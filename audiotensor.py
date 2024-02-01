@@ -44,7 +44,8 @@ class AudioTensor(Tensor):
         hop_length: int = 1,
     ):
         super().__init__()
-        self.hop_length = hop_length if data.ndim > 1 else -1
+        assert data.ndim > 1, "AudioTensor must have at least 2 dimensions"
+        self.hop_length = hop_length
 
     def __repr__(self):
         return f"Hop-length: {self.hop_length}\n" + super().__repr__()
@@ -62,7 +63,7 @@ class AudioTensor(Tensor):
     @check_hop_length
     def increase_hop_length(self, factor: int):
         assert factor > 0, "factor must be positive"
-        if factor == 1 or self.ndim < 2:
+        if factor == 1:
             return self
 
         data = self[:, ::factor].clone()
@@ -76,7 +77,7 @@ class AudioTensor(Tensor):
         else:
             assert self.hop_length % factor == 0 and factor <= self.hop_length
 
-        if factor == 1 or self.ndim < 2:
+        if factor == 1:
             return self
 
         self_copy = self.clone()
@@ -101,8 +102,6 @@ class AudioTensor(Tensor):
     @property
     @check_hop_length
     def steps(self):
-        if self.ndim < 2:
-            return 1
         return self.size(1)
 
     @check_hop_length
@@ -146,30 +145,36 @@ class AudioTensor(Tensor):
             )
             args = broadcasted_args
 
-        def get_all_hop_lengths(ys, xs):
+        def get_output_hop(cur, xs):
             if len(xs) == 0:
-                return ys
+                return cur
             x, *xs = xs
             if isinstance(x, AudioTensor):
-                return get_all_hop_lengths(ys + [x.hop_length], xs)
+                return get_output_hop(max(cur, x.hop_length), xs)
             elif isinstance(x, Iterable):
-                return get_all_hop_lengths(ys, tuple(chain(x, xs)))
+                return get_output_hop(cur, tuple(x) + xs)
             else:
-                return get_all_hop_lengths(ys, xs)
+                return get_output_hop(cur, xs)
 
-        hop_lengths = get_all_hop_lengths([], args)
-
-        if not all(h == hop_lengths[0] for h in hop_lengths):
-            out_hop_length = -1
-        else:
-            out_hop_length = hop_lengths[0]
+        output_hop = get_output_hop(-1, args)
 
         ret = super().__torch_function__(func, types, args, kwargs)
-        if isinstance(ret, AudioTensor):
-            ret.hop_length = out_hop_length
-        elif isinstance(ret, tuple) and all(isinstance(r, AudioTensor) for r in ret):
-            ret = tuple(r.set_hop_length(out_hop_length) for r in ret)
-        return ret
+
+        def post_process(out_hop, xs):
+            if len(xs) == 0:
+                return ()
+            x, *xs = xs
+            if isinstance(x, AudioTensor):
+                x.hop_length = out_hop
+                if x.ndim == 1:
+                    x.hop_length = -1
+            return (x,) + post_process(out_hop, xs)
+
+        return (
+            post_process(output_hop, ret)
+            if isinstance(ret, tuple)
+            else post_process(output_hop, (ret,))[0]
+        )
 
     @classmethod
     def broadcasting(cls, *tensors):
