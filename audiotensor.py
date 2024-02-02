@@ -168,11 +168,7 @@ class AudioTensor(Tensor):
                     x.hop_length = -1
             return (x,) + post_process(*xs)
 
-        return (
-            post_process(*ret)
-            if isinstance(ret, tuple)
-            else post_process(ret)[0]
-        )
+        return post_process(*ret) if isinstance(ret, tuple) else post_process(ret)[0]
 
     @classmethod
     def broadcasting(cls, *tensors):
@@ -181,8 +177,7 @@ class AudioTensor(Tensor):
         hop_lengths = tuple(t.hop_length for t in tensors)
         hop_length_gcd = gcd(*hop_lengths)
         ret = tuple(
-            t.reduce_hop_length(t.hop_length // hop_length_gcd)
-            for t in tensors
+            t.reduce_hop_length(t.hop_length // hop_length_gcd) for t in tensors
         )
         max_ndim = max(t.ndim for t in ret)
         ret = tuple(
