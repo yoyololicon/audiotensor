@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch.utils._pytree import tree_map, tree_flatten, tree_unflatten
 import numpy as np
 from torch import Tensor
 from typing import Union, Iterable
@@ -34,9 +35,12 @@ class AudioTensor(Tensor):
         cls,
         x,
         *args,
+        requires_grad=None,
         **kwargs,
     ):
-        return super().__new__(cls, torch.as_tensor(x))
+        if requires_grad is None:
+            return super().__new__(cls, x)
+        return cls._make_subclass(cls, x, requires_grad)
 
     def __init__(
         self,
@@ -120,28 +124,30 @@ class AudioTensor(Tensor):
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
+        flatten, spec = tree_flatten((args, kwargs))
         mask = tuple(
-            map(lambda t: isinstance(t, AudioTensor) and t.hop_length > 0, args)
+            map(lambda t: isinstance(t, AudioTensor) and t.hop_length > 0, flatten)
         )
 
         if sum(mask) > 1:
-            audio_tensors, regular_tensors = reduce(
+            audio_tensors, others = reduce(
                 lambda x, y: (x[0] + (y[1],), x[1]) if y[0] else (x[0], x[1] + (y[1],)),
-                zip(mask, args),
+                zip(mask, flatten),
                 ((), ()),
             )
 
-            audio_tensors = AudioTensor.broadcasting(*audio_tensors)
+            audio_tensors = cls.broadcasting(*audio_tensors)
             min_steps = min(a.steps for a in audio_tensors)
             audio_tensors = tuple(a.truncate(min_steps) for a in audio_tensors)
-            broadcasted_args, *_ = reduce(
-                lambda x, is_audio: (x[0] + x[1][:1], x[1][1:], x[2])
-                if is_audio
-                else (x[0] + x[2][:1], x[1], x[2][1:]),
+            flatten, *_ = reduce(
+                lambda x, is_audio: (
+                    (x[0] + x[1][:1], x[1][1:], x[2])
+                    if is_audio
+                    else (x[0] + x[2][:1], x[1], x[2][1:])
+                ),
                 mask,
-                ((), audio_tensors, regular_tensors),
+                ((), audio_tensors, others),
             )
-            args = broadcasted_args
 
         def get_output_hop(cur, xs):
             if len(xs) == 0 or cur > 0:
@@ -149,26 +155,22 @@ class AudioTensor(Tensor):
             x, *xs = xs
             if isinstance(x, AudioTensor):
                 return get_output_hop(max(cur, x.hop_length), xs)
-            elif isinstance(x, Iterable):
-                return get_output_hop(cur, list(x) + xs)
             else:
                 return get_output_hop(cur, xs)
 
-        output_hop = get_output_hop(-1, args)
+        output_hop = get_output_hop(-1, flatten)
+        broadcasted = tree_unflatten(flatten, spec)
 
-        ret = super().__torch_function__(func, types, args, kwargs)
+        def post_process(t):
+            if isinstance(t, cls):
+                t.hop_length = output_hop
+                if t.ndim == 1:
+                    t.hop_length = -1
+            return t
 
-        def post_process(*xs):
-            if len(xs) == 0:
-                return ()
-            x, *xs = xs
-            if isinstance(x, AudioTensor):
-                x.hop_length = output_hop
-                if x.ndim == 1:
-                    x.hop_length = -1
-            return (x,) + post_process(*xs)
-
-        return post_process(*ret) if isinstance(ret, tuple) else post_process(ret)[0]
+        return tree_map(
+            post_process, super().__torch_function__(func, types, *broadcasted)
+        )
 
     @classmethod
     def broadcasting(cls, *tensors):
@@ -181,9 +183,11 @@ class AudioTensor(Tensor):
         )
         max_ndim = max(t.ndim for t in ret)
         ret = tuple(
-            reduce(lambda x, _: x.unsqueeze(-1), [None] * (max_ndim - t.ndim), t)
-            if t.ndim < max_ndim
-            else t
+            (
+                reduce(lambda x, _: x.unsqueeze(-1), [None] * (max_ndim - t.ndim), t)
+                if t.ndim < max_ndim
+                else t
+            )
             for t in ret
         )
         return ret
