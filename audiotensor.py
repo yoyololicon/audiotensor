@@ -104,11 +104,13 @@ class AudioTensor(Tensor):
     @property
     @check_hop_length
     def steps(self):
+        if self.ndim < 2:
+            return torch.iinfo(torch.int32).max
         return self.size(1)
 
     @check_hop_length
     def truncate(self, steps: int):
-        if steps >= self.steps:
+        if steps >= self.steps or self.ndim < 2:
             return self
         return self.narrow(1, 0, steps)
 
